@@ -1,0 +1,302 @@
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: opa
+  namespace: opa
+---
+# kind: ClusterRoleBinding
+# apiVersion: rbac.authorization.k8s.io/v1
+# metadata:
+#   name: opa-viewer
+# roleRef:
+#   kind: ClusterRole
+#   name: view
+#   apiGroup: rbac.authorization.k8s.io
+# subjects:
+# - kind: Group
+#   name: system:serviceaccounts:opa
+#   apiGroup: rbac.authorization.k8s.io
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  namespace: opa
+  name: configmap-modifier
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs:
+    - get
+    - list
+    - watch
+    - update
+    - patch
+- apiGroups: [""]
+  resources: ["namespaces", "pods"]
+  verbs:
+    - get
+    - list
+    - watch
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs:
+    - get
+    - list
+    - watch
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  namespace: opa
+  name: opa-configmap-modifier
+roleRef:
+  kind: ClusterRole
+  name: configmap-modifier
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+- kind: Group
+  name: system:serviceaccounts:opa
+  apiGroup: rbac.authorization.k8s.io
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: opa
+  namespace: opa
+spec:
+  selector:
+    app: opa
+  ports:
+  - name: https
+    protocol: TCP
+    port: 443
+    targetPort: 8443
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: opa
+  namespace: opa
+  name: opa
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opa
+  template:
+    metadata:
+      labels:
+        app: opa
+      name: opa
+    spec:
+      serviceAccountName: opa
+      containers:
+        - name: opa
+          # image: openpolicyagent/opa:0.10.5
+          image: openpolicyagent/opa:0.52.0
+          args:
+            - "run"
+            - "--server"
+            - "--tls-cert-file=/certs/tls.crt"
+            - "--tls-private-key-file=/certs/tls.key"
+            - "--addr=0.0.0.0:8443"
+            - "--addr=http://127.0.0.1:8181"
+            - "--ignore=.*"  
+            # - "--log-format=json-pretty"
+            - "--set=status.console=true"
+            - "--set=decision_logs.console=true"
+          volumeMounts:
+            - readOnly: true
+              mountPath: /certs
+              name: opa-server
+          # readinessProbe:
+          #   httpGet:
+          #     path: /health?plugins&bundle
+          #     scheme: HTTPS
+          #     port: 8443
+          #   initialDelaySeconds: 3
+          #   periodSeconds: 5
+          # livenessProbe:
+          #   httpGet:
+          #     path: /health
+          #     scheme: HTTPS
+          #     port: 8443
+          #   initialDelaySeconds: 3
+          #   periodSeconds: 5
+          ports:
+            - containerPort: 8443
+              name: opa
+              protocol: TCP
+            - containerPort: 8181
+              name: opa-insecure
+              protocol: TCP
+        - name: kube-mgmt
+          # image: openpolicyagent/kube-mgmt:0.6
+          # image: openpolicyagent/kube-mgmt:2.0.1
+          # image: openpolicyagent/kube-mgmt:8.1.0
+          image: openpolicyagent/kube-mgmt:8.1.1
+          args:
+            - "--namespaces=opa"
+            # - "--enable-data=false"
+            - "--replicate-cluster=v1/namespaces"
+            - "--replicate=apps/v1/deployments"
+            - "--replicate=v1/pods"
+            # - "--replicate=extensions/v1beta1/ingresses"
+      volumes:
+        - name: opa-server
+          secret:
+            secretName: opa-server
+---
+# kind: ConfigMap
+# apiVersion: v1
+# metadata:
+#   name: opa-default-system-main
+#   # namespace: opa
+#   # labels:
+#   #   openpolicyagent.org/data: op
+# data:
+#   main: |
+#     package system
+
+#     import data.kubernetes.admission
+
+#     main = {
+#       "apiVersion": "admission.k8s.io/v1",
+#       "kind": "AdmissionReview",
+#       "response": response,
+#     }
+
+#     default response = {"allowed": true}
+
+#     response = {
+#         "allowed": false,
+#         "status": {
+#             "reason": reason,
+#         },
+#     } {
+#         reason = concat(", ", admission.deny)
+#         reason != ""
+#     }
+---
+kind: ValidatingWebhookConfiguration
+apiVersion: admissionregistration.k8s.io/v1
+metadata:
+  name: opa-validating-webhook
+webhooks:
+  - name: validating-webhook.openpolicyagent.org
+    namespaceSelector:
+      matchExpressions:
+      - key: openpolicyagent.org/webhook
+        operator: NotIn
+        values:
+        - ignore
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["*"]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+        scope: "*"
+    clientConfig:
+      caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNyRENDQVpRQ0NRRGVKNDVuQ2hWSEVqQU5CZ2txaGtpRzl3MEJBUXNGQURBWE1SVXdFd1lEVlFRRERBeGgKWkcxcGMzTnBiMjVmWTJFd0lCY05Nak13TlRJeU1UWXdNalEzV2hnUE1qSTVOekF6TURZeE5qQXlORGRhTUJjeApGVEFUQmdOVkJBTU1ER0ZrYldsemMybHZibDlqWVRDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDCkFRb0NnZ0VCQUtQUk1IWGl3ZDh6SmR2VEpBMld4aXJLRkRzQ05teXZDaEg4RXRoUzhFd0dqeGpyZnJOd09XRkwKWWVmUnB6cGdyeGZyRjJEdmRBZUdaUVJGZ0JWNFUrc0pVMWFpTE1sVkNiOS9TYWRoSExlQzZmaEREVEpZZXY2SApNMUlNVFFlOThkdCtISVBLcVhrTXRzY1dycFV0R3RDWVYwdGg1OE8zSGFLOUFrVzI0Y25iQUF5MjNnNVBLWXhpClBjWFE2bWFLbXRSSTZPanMwNEd4NG16U2ppWjZXbjVnU240R0svbFlVcU1zZVN0cEkveGFIQ1ZRYVg0NkpqREoKS1RNaUxKc2d4MGt5U3RTMGlQSldsdEcveGI0dlNXOWtTdjA3bWJENlh4R0g2bXdjbThkNDdHZlRoSEJySmlMZwpPQjRxTlUrWTJyeEFJcXQzakFxajh1SmwrVjdJekMwQ0F3RUFBVEFOQmdrcWhraUc5dzBCQVFzRkFBT0NBUUVBCk9IWGZiaXJLcGJmVHBFaGp5R2xueDR4alBKTXA2NXZRL3pJM1phdDJ1QktOZjVabTdCaHNEb2Jua1oyazQzOVAKTmUxcHpmVE1FeldyK2FtSkJtdjM2TkI0SVhLRXdKaHN5cGNBU01IS3NpbXJKcXFkUFVWNFhXTmZNeTFKcjE2awpPMTlBbjZreE9lRGpOMjVBU0tkRWhxbGxseDNJTWpteXZZbHYrN2JzQjJya3hjbDZDOERmeHQ0TDNkakxQdDQ1CmpCUTRyZGd1eE51M1dKZWxLQUkzNEVrcTQ1YkJXSzFjWmtrbTZ3TGdETmdmdmtGeTI4elRIQVVXSml3ZG5XS2cKd05QZWFMeHIwdTdrSHZna1RqY0ZQUVpmRy9ZbzM2eUZWZWZ5Y2xiZnY3Y2Fnc2tPNThlMWR1dXZTZDhieG9PTwppYlEvalR1NGQ2Y3E4ZUFtL2U3bjR3PT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
+      service:
+        namespace: default
+        name: kubernetes
+        namespace: "opa"
+        name: "opa"
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+
+# kind: ValidatingWebhookConfiguration
+# apiVersion: admissionregistration.k8s.io/v1
+# metadata:
+#   name: opa-validating-webhook
+# webhooks:
+#   - name: validating-webhook.openpolicyagent.org
+#     sideEffects: None
+#     admissionReviewVersions: ["v1"]
+#     rules:
+#       - operations: ["CREATE", "UPDATE"]
+#         apiGroups: ["*"]
+#         apiVersions: ["v1"]
+#         resources: ["Pod"]
+#     clientConfig:
+#       caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUNyRENDQVpRQ0NRRGVKNDVuQ2hWSEVqQU5CZ2txaGtpRzl3MEJBUXNGQURBWE1SVXdFd1lEVlFRRERBeGgKWkcxcGMzTnBiMjVmWTJFd0lCY05Nak13TlRJeU1UWXdNalEzV2hnUE1qSTVOekF6TURZeE5qQXlORGRhTUJjeApGVEFUQmdOVkJBTU1ER0ZrYldsemMybHZibDlqWVRDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDCkFRb0NnZ0VCQUtQUk1IWGl3ZDh6SmR2VEpBMld4aXJLRkRzQ05teXZDaEg4RXRoUzhFd0dqeGpyZnJOd09XRkwKWWVmUnB6cGdyeGZyRjJEdmRBZUdaUVJGZ0JWNFUrc0pVMWFpTE1sVkNiOS9TYWRoSExlQzZmaEREVEpZZXY2SApNMUlNVFFlOThkdCtISVBLcVhrTXRzY1dycFV0R3RDWVYwdGg1OE8zSGFLOUFrVzI0Y25iQUF5MjNnNVBLWXhpClBjWFE2bWFLbXRSSTZPanMwNEd4NG16U2ppWjZXbjVnU240R0svbFlVcU1zZVN0cEkveGFIQ1ZRYVg0NkpqREoKS1RNaUxKc2d4MGt5U3RTMGlQSldsdEcveGI0dlNXOWtTdjA3bWJENlh4R0g2bXdjbThkNDdHZlRoSEJySmlMZwpPQjRxTlUrWTJyeEFJcXQzakFxajh1SmwrVjdJekMwQ0F3RUFBVEFOQmdrcWhraUc5dzBCQVFzRkFBT0NBUUVBCk9IWGZiaXJLcGJmVHBFaGp5R2xueDR4alBKTXA2NXZRL3pJM1phdDJ1QktOZjVabTdCaHNEb2Jua1oyazQzOVAKTmUxcHpmVE1FeldyK2FtSkJtdjM2TkI0SVhLRXdKaHN5cGNBU01IS3NpbXJKcXFkUFVWNFhXTmZNeTFKcjE2awpPMTlBbjZreE9lRGpOMjVBU0tkRWhxbGxseDNJTWpteXZZbHYrN2JzQjJya3hjbDZDOERmeHQ0TDNkakxQdDQ1CmpCUTRyZGd1eE51M1dKZWxLQUkzNEVrcTQ1YkJXSzFjWmtrbTZ3TGdETmdmdmtGeTI4elRIQVVXSml3ZG5XS2cKd05QZWFMeHIwdTdrSHZna1RqY0ZQUVpmRy9ZbzM2eUZWZWZ5Y2xiZnY3Y2Fnc2tPNThlMWR1dXZTZDhieG9PTwppYlEvalR1NGQ2Y3E4ZUFtL2U3bjR3PT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
+#       service:
+#         namespace: opa
+#         name: opa
+
+---
+apiVersion: v1
+data:
+  image_source.rego: |
+    package kubernetes.admission
+
+    deny[msg] {
+        input.request.kind.kind = "Pod"
+        input.request.operation = "CREATE"
+        image = input.request.object.spec.containers[_].image
+        name = input.request.object.metadata.name
+        not registry_whitelisted(image,whitelisted_registries)
+        msg = sprintf("pod %q has invalid registry %q", [name, image])
+    }
+
+    whitelisted_registries = {registry |
+        registries = [
+            "602401143452.dkr.ecr.amazonaws.com",
+            ".dkr.ecr.amazonaws.com"
+        ]
+        registry = registries[_]
+    }
+
+    registry_whitelisted(str, patterns) {
+        registry_matches(str, patterns[_])
+    }
+
+    registry_matches(str, pattern) {
+        contains(str, pattern)
+    }
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  labels:
+    openpolicyagent.org/policy: rego
+  name: image
+  namespace: opa
+---
+apiVersion: v1
+data:
+  main.rego: |-
+    package system
+
+    import data.kubernetes.admission
+
+    main := {
+      "apiVersion": "admission.k8s.io/v1",
+      "kind": "AdmissionReview",
+      "response": response,
+    }
+
+    default uid := ""
+
+    uid := input.request.uid
+
+    response := {
+        "allowed": false,
+        "uid": uid,
+        "status": {
+            "message": reason,
+        },
+    } {
+        reason = concat(", ", admission.deny)
+        reason != ""
+    }
+
+    else := {"allowed": true, "uid": uid}
+kind: ConfigMap
+metadata:
+  labels:
+    
+    openpolicyagent.org/policy: rego
+  creationTimestamp: null
+  name: main

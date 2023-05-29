@@ -1,0 +1,11 @@
+kind: Pod
+apiVersion: v1
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+  namespace: test-ns
+spec:
+  containers:
+  - image: 602401143452.dkr.ecr.amazonaws.com/nginx
+      name: nginx
